@@ -207,17 +207,29 @@ def post_sheets(data: dict) -> dict:
     return {"status": "error", "message": "unknown"}
 
 def get_sheets(action: str) -> dict:
-    try:
-        r = requests.get(
-            f"{GOOGLE_SCRIPT_URL}?action={action}",
-            timeout=30,
-            allow_redirects=True,
-        )
-        log.info(f"GET {action} status={r.status_code} body={r.text[:200]}")
-        return r.json()
-    except Exception as e:
-        log.exception(f"GET {action} error: {e}")
-        return {"status": "error"}
+    """GET ke Apps Script. Auto-retry 2x kalau timeout (cold start handling)."""
+    if not GOOGLE_SCRIPT_URL:
+        log.error("GOOGLE_SCRIPT_URL tidak diset!")
+        return {"status": "error", "message": "url_kosong"}
+
+    url = f"{GOOGLE_SCRIPT_URL}?action={action}"
+    for attempt in (1, 2, 3):
+        try:
+            r = requests.get(url, timeout=60, allow_redirects=True)
+            log.info(f"GET {action} attempt {attempt} status={r.status_code} body={r.text[:200]}")
+            try:
+                return r.json()
+            except ValueError:
+                return {"status": "error", "message": f"non_json (http {r.status_code})"}
+        except requests.Timeout:
+            log.warning(f"GET {action} attempt {attempt} TIMEOUT")
+            if attempt == 3:
+                return {"status": "error", "message": "timeout"}
+        except Exception as e:
+            log.exception(f"GET {action} attempt {attempt} error: {e}")
+            if attempt == 3:
+                return {"status": "error", "message": str(e)}
+    return {"status": "error", "message": "unknown"}
 
 def get_sheets_saldo(sumber: str) -> dict:
     try:
@@ -427,12 +439,11 @@ def webhook():
 
     # ── /gajadi ──
     if lower in ["/gajadi", "/batal"]:
-        # Proses delete langsung. Kalau timeout (cold start) → asumsi sukses
-        # tanpa detail, krn data biasanya tetep kehapus walaupun response gak balik.
+        # Mode transparan: selalu tunggu detail dari Apps Script.
+        # Kalau timeout/error, tampilkan error jelas — user yang putuskan retry.
         r = get_sheets("delete_last")
         status = r.get("status")
         if status == "ok":
-            # Sukses + dapet detail transaksi yang dihapus
             d = r.get("data", {})
             send(chat_id, f"""🗑️ *Transaksi terakhir dihapus!*
 
@@ -442,10 +453,8 @@ Dashboard akan terupdate otomatis.""")
         elif status == "empty":
             send(chat_id, "Tidak ada transaksi yang bisa dihapus.")
         else:
-            # Timeout / error lain → asumsi sukses (datanya biasanya tetep kehapus
-            # di Apps Script walaupun kita gak dapet response detail)
-            log.warning(f"/gajadi response: {r}, asumsi sukses tanpa detail")
-            send(chat_id, "🗑️ *Transaksi terakhir berhasil dihapus.*\n\nDashboard akan terupdate otomatis.")
+            log.error(f"/gajadi error: {r}")
+            send(chat_id, "❌ Gagal hapus transaksi. Coba ketik /gajadi lagi ya.")
         return jsonify({"ok": True})
 
     # ── /reset ──
