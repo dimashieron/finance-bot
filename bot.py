@@ -1,6 +1,7 @@
 import os
 import re
 import logging
+import threading
 import requests
 from datetime import datetime
 from flask import Flask, request, jsonify
@@ -232,10 +233,28 @@ def get_sheets_saldo(sumber: str) -> dict:
         return {"status": "error"}
 
 # ─── TELEGRAM ─────────────────────────────────────────────────────────────────
-def send(chat_id: int, text: str):
-    requests.post(f"{TELEGRAM_API}/sendMessage", json={
-        "chat_id": chat_id, "text": text, "parse_mode": "Markdown"
-    }, timeout=10)
+def send(chat_id: int, text: str) -> int | None:
+    """Kirim pesan ke Telegram, return message_id biar bisa di-edit nanti."""
+    try:
+        r = requests.post(f"{TELEGRAM_API}/sendMessage", json={
+            "chat_id": chat_id, "text": text, "parse_mode": "Markdown"
+        }, timeout=10)
+        return r.json().get("result", {}).get("message_id")
+    except Exception as e:
+        log.exception(f"send error: {e}")
+        return None
+
+def edit(chat_id: int, message_id: int, text: str):
+    """Edit pesan yang udah dikirim. Dipakai buat update '⏳ Mencatat...' jadi hasil akhir."""
+    try:
+        requests.post(f"{TELEGRAM_API}/editMessageText", json={
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "Markdown",
+        }, timeout=10)
+    except Exception as e:
+        log.exception(f"edit error: {e}")
 
 def fmt(n: float) -> str:
     return f"Rp {int(n):,}".replace(",", ".")
@@ -483,11 +502,16 @@ Sertakan sumber dananya ya:
 Ketik /help untuk panduan lengkap.""")
             return jsonify({"ok": True})
 
-        # Simpan ke Sheets
-        saved = post_sheets(result)
-        if saved.get("status") == "ok":
-            icon = {"Pemasukan": "💚", "Pengeluaran": "🔴", "Tabungan": "🏦"}.get(tipe, "📝")
-            send(chat_id, f"""{icon} *{tipe} tercatat!*
+        # Kirim ACK instan biar user tau bot udah terima command,
+        # terus proses POST ke Sheets di background thread (handle cold start).
+        ack_text = "⏳ Sedang mencatat ke Sheets...\n_(tunggu sebentar ya)_"
+        message_id = send(chat_id, ack_text)
+
+        def _save_and_reply():
+            saved = post_sheets(result)
+            if saved.get("status") == "ok":
+                icon = {"Pemasukan": "💚", "Pengeluaran": "🔴", "Tabungan": "🏦"}.get(tipe, "📝")
+                final = f"""{icon} *{tipe} tercatat!*
 
 📝 {result['deskripsi']}
 💳 Sumber: *{result['sumber']}*
@@ -495,16 +519,23 @@ Ketik /help untuk panduan lengkap.""")
 💵 {fmt(result['nominal'])}
 📅 {result['tanggal']}
 
-_Salah input? Ketik /gajadi_""")
-        else:
-            reason = saved.get("message", "")
-            log.error(f"post_sheets gagal: {saved}")
-            if reason == "timeout":
-                send(chat_id, "⏱️ Server Sheets lambat merespon, tapi data *kemungkinan sudah masuk*.\n\nCek di Google Sheets ya. Kalau dobel, pakai /gajadi.")
-            elif reason == "url_kosong":
-                send(chat_id, "❌ `GOOGLE_SCRIPT_URL` belum diset di environment variable.")
+_Salah input? Ketik /gajadi_"""
             else:
-                send(chat_id, f"❌ Gagal simpan ke Sheets.\n\n_Detail: {reason[:150]}_")
+                reason = saved.get("message", "")
+                log.error(f"post_sheets gagal: {saved}")
+                if reason == "timeout":
+                    final = "⏱️ Server Sheets lambat merespon, tapi data *kemungkinan sudah masuk*.\n\nCek di Google Sheets ya. Kalau dobel, pakai /gajadi."
+                elif reason == "url_kosong":
+                    final = "❌ `GOOGLE_SCRIPT_URL` belum diset di environment variable."
+                else:
+                    final = f"❌ Gagal simpan ke Sheets.\n\n_Detail: {reason[:150]}_"
+
+            if message_id:
+                edit(chat_id, message_id, final)
+            else:
+                send(chat_id, final)
+
+        threading.Thread(target=_save_and_reply, daemon=True).start()
         return jsonify({"ok": True})
 
     # ── Tidak dikenali ──
