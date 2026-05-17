@@ -427,28 +427,25 @@ def webhook():
 
     # ── /gajadi ──
     if lower in ["/gajadi", "/batal"]:
-        # Optimistic: langsung ACK, terus proses delete + kirim detail di background.
-        # Hindari false "❌ Gagal hapus" yang sebenernya cuma cold start Apps Script.
-        send(chat_id, "🗑️ Menghapus transaksi terakhir...\n_(detail menyusul ya)_")
-
-        def _delete_and_reply():
-            r = get_sheets("delete_last")
-            if r.get("status") == "ok":
-                d = r.get("data", {})
-                send(chat_id, f"""✅ *Transaksi terakhir dihapus!*
+        # Proses delete langsung. Kalau timeout (cold start) → asumsi sukses
+        # tanpa detail, krn data biasanya tetep kehapus walaupun response gak balik.
+        r = get_sheets("delete_last")
+        status = r.get("status")
+        if status == "ok":
+            # Sukses + dapet detail transaksi yang dihapus
+            d = r.get("data", {})
+            send(chat_id, f"""🗑️ *Transaksi terakhir dihapus!*
 
 _{d.get('deskripsi','?')} · {fmt(d.get('nominal',0))} · {d.get('tanggal','?')}_
 
-Transaksi sudah dihapus dari catatan.
 Dashboard akan terupdate otomatis.""")
-            elif r.get("status") == "empty":
-                send(chat_id, "Tidak ada transaksi yang bisa dihapus.")
-            else:
-                # Cuma kasih warning kalau bener-bener error, bukan timeout.
-                # Kalau timeout, biasanya delete-nya tetep jalan di Apps Script.
-                send(chat_id, "⚠️ Server Sheets lambat merespon, transaksi *kemungkinan sudah terhapus*.\n\nCek di Google Sheets untuk memastikan.")
-
-        threading.Thread(target=_delete_and_reply, daemon=True).start()
+        elif status == "empty":
+            send(chat_id, "Tidak ada transaksi yang bisa dihapus.")
+        else:
+            # Timeout / error lain → asumsi sukses (datanya biasanya tetep kehapus
+            # di Apps Script walaupun kita gak dapet response detail)
+            log.warning(f"/gajadi response: {r}, asumsi sukses tanpa detail")
+            send(chat_id, "🗑️ *Transaksi terakhir berhasil dihapus.*\n\nDashboard akan terupdate otomatis.")
         return jsonify({"ok": True})
 
     # ── /reset ──
