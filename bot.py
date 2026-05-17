@@ -427,19 +427,28 @@ def webhook():
 
     # ── /gajadi ──
     if lower in ["/gajadi", "/batal"]:
-        r = get_sheets("delete_last")
-        if r.get("status") == "ok":
-            d = r.get("data", {})
-            send(chat_id, f"""🗑️ *Transaksi terakhir dihapus!*
+        # Optimistic: langsung ACK, terus proses delete + kirim detail di background.
+        # Hindari false "❌ Gagal hapus" yang sebenernya cuma cold start Apps Script.
+        send(chat_id, "🗑️ Menghapus transaksi terakhir...\n_(detail menyusul ya)_")
+
+        def _delete_and_reply():
+            r = get_sheets("delete_last")
+            if r.get("status") == "ok":
+                d = r.get("data", {})
+                send(chat_id, f"""✅ *Transaksi terakhir dihapus!*
 
 _{d.get('deskripsi','?')} · {fmt(d.get('nominal',0))} · {d.get('tanggal','?')}_
 
 Transaksi sudah dihapus dari catatan.
 Dashboard akan terupdate otomatis.""")
-        elif r.get("status") == "empty":
-            send(chat_id, "Tidak ada transaksi yang bisa dihapus.")
-        else:
-            send(chat_id, "❌ Gagal hapus, coba lagi.")
+            elif r.get("status") == "empty":
+                send(chat_id, "Tidak ada transaksi yang bisa dihapus.")
+            else:
+                # Cuma kasih warning kalau bener-bener error, bukan timeout.
+                # Kalau timeout, biasanya delete-nya tetep jalan di Apps Script.
+                send(chat_id, "⚠️ Server Sheets lambat merespon, transaksi *kemungkinan sudah terhapus*.\n\nCek di Google Sheets untuk memastikan.")
+
+        threading.Thread(target=_delete_and_reply, daemon=True).start()
         return jsonify({"ok": True})
 
     # ── /reset ──
