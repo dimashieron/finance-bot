@@ -416,12 +416,13 @@ def webhook():
 
     # ── /refresh ──
     if lower == "/refresh":
-        send(chat_id, "🔄 Sedang refresh dashboard...")
-        r = get_sheets("refresh")
-        if r.get("status") == "ok":
-            send(chat_id, "✅ Dashboard berhasil direfresh!\n\nBuka Google Sheets untuk melihat tampilan terbaru.")
-        else:
-            send(chat_id, "❌ Gagal refresh. Coba lagi ya.")
+        # Optimistic: langsung kasih tau user, proses refresh di background.
+        # Apps Script tetap akan dijalankan, cuma user gak perlu nunggu cold start.
+        send(chat_id, "✅ Dashboard sedang di-refresh!\n\nBuka Google Sheets untuk melihat tampilan terbaru. _(butuh ~10-30 detik kalau Apps Script lagi cold start)_")
+        threading.Thread(
+            target=lambda: get_sheets("refresh"),
+            daemon=True,
+        ).start()
         return jsonify({"ok": True})
 
     # ── /gajadi ──
@@ -502,16 +503,12 @@ Sertakan sumber dananya ya:
 Ketik /help untuk panduan lengkap.""")
             return jsonify({"ok": True})
 
-        # Kirim ACK instan biar user tau bot udah terima command,
-        # terus proses POST ke Sheets di background thread (handle cold start).
-        ack_text = "⏳ Sedang mencatat ke Sheets...\n_(tunggu sebentar ya)_"
-        message_id = send(chat_id, ack_text)
-
-        def _save_and_reply():
-            saved = post_sheets(result)
-            if saved.get("status") == "ok":
-                icon = {"Pemasukan": "💚", "Pengeluaran": "🔴", "Tabungan": "🏦"}.get(tipe, "📝")
-                final = f"""{icon} *{tipe} tercatat!*
+        # Optimistic: langsung kasih konfirmasi sukses ke user.
+        # POST ke Apps Script jalan di background — datanya tetap masuk Sheet.
+        # Apps Script kadang lambat respon (cold start), tapi appendRow-nya
+        # hampir selalu sukses. Kalau emang error beneran, kita kirim warning susulan.
+        icon = {"Pemasukan": "💚", "Pengeluaran": "🔴", "Tabungan": "🏦"}.get(tipe, "📝")
+        send(chat_id, f"""{icon} *{tipe} tercatat!*
 
 📝 {result['deskripsi']}
 💳 Sumber: *{result['sumber']}*
@@ -519,23 +516,21 @@ Ketik /help untuk panduan lengkap.""")
 💵 {fmt(result['nominal'])}
 📅 {result['tanggal']}
 
-_Salah input? Ketik /gajadi_"""
-            else:
+_Salah input? Ketik /gajadi_""")
+
+        def _save_in_background():
+            saved = post_sheets(result)
+            if saved.get("status") != "ok":
                 reason = saved.get("message", "")
-                log.error(f"post_sheets gagal: {saved}")
-                if reason == "timeout":
-                    final = "⏱️ Server Sheets lambat merespon, tapi data *kemungkinan sudah masuk*.\n\nCek di Google Sheets ya. Kalau dobel, pakai /gajadi."
-                elif reason == "url_kosong":
-                    final = "❌ `GOOGLE_SCRIPT_URL` belum diset di environment variable."
-                else:
-                    final = f"❌ Gagal simpan ke Sheets.\n\n_Detail: {reason[:150]}_"
+                log.error(f"post_sheets gagal di background: {saved}")
+                # Kasih warning susulan cuma kalau error nyata (bukan timeout —
+                # timeout biasanya cuma response yang lambat, datanya tetep masuk).
+                if reason == "url_kosong":
+                    send(chat_id, "⚠️ `GOOGLE_SCRIPT_URL` belum diset di environment variable.")
+                elif reason and reason != "timeout":
+                    send(chat_id, f"⚠️ Sepertinya ada masalah saat simpan ke Sheets.\n\nCek di Google Sheets ya. Kalau gak ada, ulangi command-nya.\n\n_Detail: {reason[:150]}_")
 
-            if message_id:
-                edit(chat_id, message_id, final)
-            else:
-                send(chat_id, final)
-
-        threading.Thread(target=_save_and_reply, daemon=True).start()
+        threading.Thread(target=_save_in_background, daemon=True).start()
         return jsonify({"ok": True})
 
     # ── Tidak dikenali ──
