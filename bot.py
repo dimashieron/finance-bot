@@ -1,8 +1,16 @@
 import os
 import re
+import logging
 import requests
 from datetime import datetime
 from flask import Flask, request, jsonify
+
+# ─── LOGGING ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger("finance-bot")
 
 app = Flask(__name__)
 
@@ -163,24 +171,64 @@ def parse_command(text: str) -> dict:
 
 # ─── SHEETS API ───────────────────────────────────────────────────────────────
 def post_sheets(data: dict) -> dict:
-    try:
-        r = requests.post(GOOGLE_SCRIPT_URL, json=data, timeout=15)
-        return r.json()
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    """POST ke Apps Script. Auto-retry 1x kalau timeout (cold start)."""
+    if not GOOGLE_SCRIPT_URL:
+        log.error("GOOGLE_SCRIPT_URL tidak diset!")
+        return {"status": "error", "message": "url_kosong"}
+
+    log.info(f"POST sheets payload: {data}")
+
+    for attempt in (1, 2):
+        try:
+            r = requests.post(
+                GOOGLE_SCRIPT_URL,
+                json=data,
+                timeout=30,
+                allow_redirects=True,
+            )
+            log.info(f"POST attempt {attempt} status={r.status_code} body={r.text[:300]}")
+            try:
+                return r.json()
+            except ValueError:
+                # response bukan JSON (biasanya HTML error dari Google)
+                return {
+                    "status": "error",
+                    "message": f"non_json (http {r.status_code}): {r.text[:200]}",
+                }
+        except requests.Timeout:
+            log.warning(f"POST attempt {attempt} TIMEOUT")
+            if attempt == 2:
+                return {"status": "error", "message": "timeout"}
+        except Exception as e:
+            log.exception(f"POST attempt {attempt} error: {e}")
+            return {"status": "error", "message": str(e)}
+
+    return {"status": "error", "message": "unknown"}
 
 def get_sheets(action: str) -> dict:
     try:
-        r = requests.get(f"{GOOGLE_SCRIPT_URL}?action={action}", timeout=20)
+        r = requests.get(
+            f"{GOOGLE_SCRIPT_URL}?action={action}",
+            timeout=30,
+            allow_redirects=True,
+        )
+        log.info(f"GET {action} status={r.status_code} body={r.text[:200]}")
         return r.json()
     except Exception as e:
+        log.exception(f"GET {action} error: {e}")
         return {"status": "error"}
 
 def get_sheets_saldo(sumber: str) -> dict:
     try:
-        r = requests.get(f"{GOOGLE_SCRIPT_URL}?action=saldo_sumber&sumber={sumber}", timeout=15)
+        r = requests.get(
+            f"{GOOGLE_SCRIPT_URL}?action=saldo_sumber&sumber={sumber}",
+            timeout=30,
+            allow_redirects=True,
+        )
+        log.info(f"GET saldo_sumber={sumber} status={r.status_code} body={r.text[:200]}")
         return r.json()
     except Exception as e:
+        log.exception(f"GET saldo_sumber error: {e}")
         return {"status": "error"}
 
 # ─── TELEGRAM ─────────────────────────────────────────────────────────────────
@@ -263,6 +311,7 @@ def webhook():
     chat_id = msg["chat"]["id"]
     nama = msg["from"].get("first_name", "kamu")
     text = msg.get("text", "").strip()
+    log.info(f"INCOMING chat_id={chat_id} nama={nama} text={text!r}")
     if not text:
         return jsonify({"ok": True})
 
@@ -448,7 +497,14 @@ Ketik /help untuk panduan lengkap.""")
 
 _Salah input? Ketik /gajadi_""")
         else:
-            send(chat_id, "❌ Gagal simpan ke Sheets.\nPastikan Google Script URL sudah benar.")
+            reason = saved.get("message", "")
+            log.error(f"post_sheets gagal: {saved}")
+            if reason == "timeout":
+                send(chat_id, "⏱️ Server Sheets lambat merespon, tapi data *kemungkinan sudah masuk*.\n\nCek di Google Sheets ya. Kalau dobel, pakai /gajadi.")
+            elif reason == "url_kosong":
+                send(chat_id, "❌ `GOOGLE_SCRIPT_URL` belum diset di environment variable.")
+            else:
+                send(chat_id, f"❌ Gagal simpan ke Sheets.\n\n_Detail: {reason[:150]}_")
         return jsonify({"ok": True})
 
     # ── Tidak dikenali ──
