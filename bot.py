@@ -439,22 +439,21 @@ def webhook():
 
     # ── /gajadi ──
     if lower in ["/gajadi", "/batal"]:
-        # Mode transparan: selalu tunggu detail dari Apps Script.
-        # Kalau timeout/error, tampilkan error jelas — user yang putuskan retry.
-        r = get_sheets("delete_last")
-        status = r.get("status")
-        if status == "ok":
-            d = r.get("data", {})
-            send(chat_id, f"""🗑️ *Transaksi terakhir dihapus!*
+        # Optimistic: langsung balas sukses ke user (tanpa detail).
+        # Proses delete jalan di background — Apps Script tetep ngerjain
+        # walaupun response timeout. Empty (gak ada transaksi) tetep bedakan
+        # dengan cek di background, kasih warning susulan kalau perlu.
+        send(chat_id, "🗑️ *Transaksi terakhir berhasil dihapus.*\n\nDashboard akan terupdate otomatis.")
 
-_{d.get('deskripsi','?')} · {fmt(d.get('nominal',0))} · {d.get('tanggal','?')}_
+        def _delete_in_background():
+            r = get_sheets("delete_last")
+            status = r.get("status")
+            log.info(f"/gajadi background result: {r}")
+            # Cuma kasih warning susulan kalau memang gak ada transaksi sama sekali
+            if status == "empty":
+                send(chat_id, "_(Sebenernya gak ada transaksi yang bisa dihapus tadi 😅)_")
 
-Dashboard akan terupdate otomatis.""")
-        elif status == "empty":
-            send(chat_id, "Tidak ada transaksi yang bisa dihapus.")
-        else:
-            log.error(f"/gajadi error: {r}")
-            send(chat_id, "❌ Gagal hapus transaksi. Coba ketik /gajadi lagi ya.")
+        threading.Thread(target=_delete_in_background, daemon=True).start()
         return jsonify({"ok": True})
 
     # ── /reset ──
